@@ -1,0 +1,13 @@
+# Compiled executable
+terminator
+
+# Object files
+*.o
+
+# Command history
+.terminator_history
+
+# Debug files
+core
+core.*
+ 
