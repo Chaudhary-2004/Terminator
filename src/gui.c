@@ -452,22 +452,20 @@ static void draw_tab_bar(void)
 
 
 
-static void draw_output(int max_lines, int start_y)
+static int draw_output(int max_lines, int start_y)
 {
     Tab *t = current_tab();
 
-    /*
-     * Store the starting position and length of every
-     * visually wrapped output line.
-     */
+    /* Keep the positions of visually wrapped output lines. */
     int line_start[MAX_OUTPUT];
     int line_length[MAX_OUTPUT];
-
     int total_lines = 0;
     int a = 0;
-
     int max_width = window_width - 20;
     int length = (int)strlen(t->output);
+
+    if (max_lines < 0)
+        max_lines = 0;
 
     while (a < length && total_lines < MAX_OUTPUT)
     {
@@ -476,9 +474,7 @@ static void draw_output(int max_lines, int start_y)
         while (b < length &&
                t->output[b] != '\n' &&
                t->output[b] != '\r')
-        {
             b++;
-        }
 
         int remaining = b - a;
 
@@ -490,8 +486,7 @@ static void draw_output(int max_lines, int start_y)
         }
         else
         {
-            while (remaining > 0 &&
-                   total_lines < MAX_OUTPUT)
+            while (remaining > 0 && total_lines < MAX_OUTPUT)
             {
                 int chunk = wrapped_chunk_length(
                     t->output + a,
@@ -501,7 +496,6 @@ static void draw_output(int max_lines, int start_y)
 
                 line_start[total_lines] = a;
                 line_length[total_lines] = chunk;
-
                 total_lines++;
 
                 a += chunk;
@@ -513,40 +507,24 @@ static void draw_output(int max_lines, int start_y)
 
         if (a < length && t->output[a] == '\r')
             a++;
-
         if (a < length && t->output[a] == '\n')
             a++;
     }
 
-    /*
-     * Keep only the most recent output lines that fit
-     * in the available area.
-     */
+    /* If output is longer than the window, show its latest lines. */
     int first_line = total_lines - max_lines;
-
     if (first_line < 0)
         first_line = 0;
 
-    int visible_lines = total_lines - first_line;
-
     int y = start_y;
-
-    /*
-     * Position the visible output at the bottom of
-     * its available area.
-     */
-    y += (max_lines - visible_lines) * LINE_HEIGHT;
 
     for (a = first_line; a < total_lines; a++)
     {
         if (line_length[a] > 0)
         {
             XDrawString(
-                d,
-                w,
-                g,
-                10,
-                y,
+                d, w, g,
+                10, y,
                 t->output + line_start[a],
                 line_length[a]
             );
@@ -554,142 +532,106 @@ static void draw_output(int max_lines, int start_y)
 
         y += LINE_HEIGHT;
     }
+
+    /* Return the next free baseline, so the prompt follows output. */
+    return y;
 }
-
-
 
 
 static void redraw(void)
 {
     Tab *t = current_tab();
-
     char prompt[GUI_MAX_INPUT + 128];
-
     int length;
     int offset = 0;
-
     int max_width = window_width - 20;
+    int output_start_y = TAB_BAR_HEIGHT + LINE_HEIGHT;
 
     XClearWindow(d, w);
-
     draw_tab_bar();
 
-    /*
-     * Prepare the prompt.
-     */
+    /* Build the editable prompt/search line. */
     if (t->search_mode)
     {
-        const char *match;
-
-        if (t->search_index >= 0)
-            match = history[t->search_index];
-        else
-            match = "(no match)";
+        const char *match = (t->search_index >= 0)
+            ? history[t->search_index]
+            : "(no match)";
 
         snprintf(
-            prompt,
-            sizeof(prompt),
+            prompt, sizeof(prompt),
             "(reverse-i-search)`%.100s': %.1000s",
-            t->search_query,
-            match
+            t->search_query, match
         );
     }
     else
     {
-        snprintf(
-            prompt,
-            sizeof(prompt),
-            "%s%s",
-            PROMPT,
-            t->input
-        );
+        snprintf(prompt, sizeof(prompt), "%s%s", PROMPT, t->input);
     }
 
     /*
-     * Calculate how many visual lines the prompt needs.
+     * Normal terminal flow: output begins below the tab bar and
+     * the prompt is drawn immediately after the visible output.
+     * While a command runs, reserve no prompt row at all.
      */
-    length = (int)strlen(prompt);
+    int available_lines = (window_height - 10 - output_start_y) / LINE_HEIGHT;
+    if (available_lines < 0)
+        available_lines = 0;
 
     int prompt_lines = 0;
-    int remaining = length;
-
-    while (remaining > 0)
+    if (!t->command_running)
     {
-        int chunk = wrapped_chunk_length(
-            prompt + offset,
-            remaining,
-            max_width
-        );
+        length = (int)strlen(prompt);
+        int remaining = length;
 
-        offset += chunk;
-        remaining -= chunk;
-        prompt_lines++;
+        while (remaining > 0)
+        {
+            int chunk = wrapped_chunk_length(
+                prompt + offset, remaining, max_width
+            );
+            offset += chunk;
+            remaining -= chunk;
+            prompt_lines++;
+        }
+
+        if (prompt_lines == 0)
+            prompt_lines = 1;
     }
 
-    if (prompt_lines == 0)
-        prompt_lines = 1;
+    int output_lines = available_lines - prompt_lines;
+    if (t->command_running)
+        output_lines = available_lines;
+    if (output_lines < 0)
+        output_lines = 0;
 
-    /*
-     * Reserve the bottom area for the prompt.
-     */
-    int prompt_y = window_height - 10
-                   - (prompt_lines - 1) * LINE_HEIGHT;
+    int prompt_y = draw_output(output_lines, output_start_y);
 
-    /*
-     * Calculate the space available for output.
-     */
-    int output_start_y = TAB_BAR_HEIGHT + LINE_HEIGHT;
-
-    int available_height = prompt_y
-                           - output_start_y
-                           - LINE_HEIGHT;
-
-    int max_output_lines = available_height / LINE_HEIGHT;
-
-    if (max_output_lines < 0)
-        max_output_lines = 0;
-
-    /*
-     * Draw only the latest output lines.
-     * The prompt area is never overwritten.
-     */
-    draw_output(max_output_lines, output_start_y);
-
-    /*
-     * Draw the prompt.
-     */
-    offset = 0;
-    remaining = length;
-
-    int y = prompt_y - (prompt_lines - 1) * LINE_HEIGHT;
-
-    while (remaining > 0)
+    /* Do not show an empty/editable prompt while a command is running. */
+    if (!t->command_running)
     {
-        int chunk = wrapped_chunk_length(
-            prompt + offset,
-            remaining,
-            max_width
-        );
+        offset = 0;
+        int remaining = (int)strlen(prompt);
 
-        XDrawString(
-            d,
-            w,
-            g,
-            10,
-            y,
-            prompt + offset,
-            chunk
-        );
+        while (remaining > 0)
+        {
+            int chunk = wrapped_chunk_length(
+                prompt + offset, remaining, max_width
+            );
 
-        offset += chunk;
-        remaining -= chunk;
+            XDrawString(
+                d, w, g,
+                10, prompt_y,
+                prompt + offset,
+                chunk
+            );
 
-        y += LINE_HEIGHT;
+            offset += chunk;
+            remaining -= chunk;
+            prompt_y += LINE_HEIGHT;
+        }
     }
 
     XFlush(d);
 }
-
 
 
 /* =========================================================
@@ -1198,9 +1140,10 @@ void run_gui(TerminatorMode mode)
 
             t = current_tab();
 
-            /* Ctrl+C */
+            /* Ctrl+C and Ctrl+P: interrupt the current command. */
             if ((e.xkey.state & ControlMask) &&
-                (k == XK_c || k == XK_C))
+                (k == XK_c || k == XK_C ||
+                 k == XK_p || k == XK_P))
             {
                 handle_ctrl_c(t);
 
@@ -1252,6 +1195,14 @@ void run_gui(TerminatorMode mode)
 
                 continue;
             }
+
+            /*
+             * A normal terminal does not accept another command while
+             * the foreground command is running. Signal and tab shortcuts
+             * above remain available; ignore other keys until it finishes.
+             */
+            if (t->command_running)
+                continue;
 
             /* Ctrl+R: reverse history search */
             if ((e.xkey.state & ControlMask) &&
