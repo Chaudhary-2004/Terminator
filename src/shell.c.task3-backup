@@ -1,0 +1,732 @@
+
+#include "shell.h"
+#include "parser.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
+#include <sys/stat.h>
+#include <time.h>
+
+typedef struct
+{
+    int id;
+    pid_t pgid;
+    pid_t pids[MAX_COMMANDS];
+    int process_count;
+    int output_fd;
+    int active;
+    int background;
+    int alive[MAX_COMMANDS];
+    char command[MAX_COMMAND];
+} Job;
+
+static int last_status = 0;
+static int exit_requested = 0;
+static Job jobs[SHELL_MAX_JOBS];
+static int next_job_id = 1;
+static pid_t foreground_pgid = 0;
+
+int shell_exit_requested(void)
+{
+    return exit_requested;
+}
+
+/* Run built-in commands inside the shell process. */
+static int run_builtin(Command *cmd, char *output,
+                       int output_size, int *handled)
+{
+    char path[MAX_COMMAND];
+    const char *a;
+
+    *handled = 1;
+
+    if (strcmp(cmd->args[0], "cd") == 0)
+    {
+        a = cmd->args[1];
+
+        if (a == NULL)
+            a = getenv("HOME");
+
+        if (a == NULL)
+        {
+            snprintf(output, output_size,
+                     "cd: HOME is not set\n");
+            return 1;
+        }
+
+        if (chdir(a) == -1)
+        {
+            snprintf(output, output_size,
+                     "cd: %s: %s\n", a, strerror(errno));
+            return 1;
+        }
+
+        return 0;
+    }
+
+    if (strcmp(cmd->args[0], "jobs") == 0)
+    {
+        shell_jobs(output, output_size);
+        return 0;
+    }
+    if (strcmp(cmd->args[0], "fg") == 0)
+    {
+        int id = 0;
+
+        if (cmd->args[1] != NULL)
+            id = atoi(cmd->args[1]);
+
+        return shell_fg(id, output, output_size);
+    }
+
+    if (strcmp(cmd->args[0], "bg") == 0)
+    {
+        int id = 0;
+
+        if (cmd->args[1] != NULL)
+            id = atoi(cmd->args[1]);
+
+        return shell_bg(id, output, output_size);
+    }
+    if (strcmp(cmd->args[0], "pwd") == 0)
+    {
+        if (getcwd(path, sizeof(path)) == NULL)
+        {
+            snprintf(output, output_size,
+                     "pwd: %s\n", strerror(errno));
+            return 1;
+        }
+
+        snprintf(output, output_size, "%s\n", path);
+        return 0;
+    }
+
+    if (strcmp(cmd->args[0], "exit") == 0)
+    {
+        int code = last_status;
+
+        if (cmd->args[1] != NULL)
+            code = atoi(cmd->args[1]);
+
+        exit_requested = 1;
+        return code;
+    }
+
+    *handled = 0;
+    return 0;
+}
+
+/* Close both ends of all pipeline pipes. */
+static void close_pipeline_pipes(int pipes[][2], int count)
+{
+    int a;
+
+    for (a = 0; a < count; a++)
+    {
+        close(pipes[a][0]);
+        close(pipes[a][1]);
+    }
+}
+
+/* Wait for a child, retrying if interrupted. */
+static int wait_for_child(pid_t pid, int *status)
+{
+    pid_t waited;
+
+    do
+    {
+        waited = waitpid(pid, status, 0);
+    } while (waited == -1 && errno == EINTR);
+
+    return waited == pid ? 0 : -1;
+}
+
+/* Find a free slot for a background job. */
+static Job *allocate_job(void)
+{
+    int a;
+
+    for (a = 0; a < SHELL_MAX_JOBS; a++)
+    {
+        if (!jobs[a].active)
+        {
+            memset(&jobs[a], 0, sizeof(jobs[a]));
+            jobs[a].output_fd = -1;
+            jobs[a].active = 1;
+            jobs[a].background = 1;
+            jobs[a].id = next_job_id++;
+            return &jobs[a];
+        }
+    }
+
+    return NULL;
+}
+
+static void append_text(char *output, int output_size,
+                        size_t *used, const char *text)
+{
+    size_t available;
+    size_t len;
+
+    if (output == NULL || output_size <= 0 || text == NULL)
+        return;
+
+    available = (size_t)output_size - 1 - *used;
+    len = strlen(text);
+    if (len > available)
+        len = available;
+
+    if (len > 0)
+    {
+        memcpy(output + *used, text, len);
+        *used += len;
+        output[*used] = '\0';
+    }
+}
+
+/* Execute a pipeline. Background pipelines return without waiting. */
+static int execute_pipeline(Command cmds[], int count,
+                            char *output, int output_size)
+{
+    int pipes[MAX_COMMANDS - 1][2];
+    int capture[2];
+    pid_t pids[MAX_COMMANDS];
+    int a, b, used = 0, result = 0, status, fork_failed = 0;
+    int background = cmds[0].background;
+    Job *job = NULL;
+    char buffer[1024];
+    ssize_t n;
+    size_t total = 0;
+
+    output[0] = '\0';
+
+    if (background)
+    {
+        job = allocate_job();
+        if (job == NULL)
+        {
+            snprintf(output, output_size, "terminator: job table full\n");
+            return 1;
+        }
+        size_t cmd_used = 0;
+        int ci, ai;
+        for (ci = 0; ci < count; ci++)
+        {
+            if (ci > 0 && cmd_used + 3 < sizeof(job->command))
+            {
+                memcpy(job->command + cmd_used, " | ", 3);
+                cmd_used += 3;
+            }
+            for (ai = 0; cmds[ci].args[ai] != NULL; ai++)
+            {
+                size_t len = strlen(cmds[ci].args[ai]);
+                if (cmd_used + len + 2 >= sizeof(job->command))
+                    break;
+                if (ai > 0)
+                    job->command[cmd_used++] = ' ';
+                memcpy(job->command + cmd_used, cmds[ci].args[ai], len);
+                cmd_used += len;
+            }
+            job->command[cmd_used] = '\0';
+        }
+    }
+
+    for (a = 0; a < count - 1; a++)
+    {
+        if (pipe(pipes[a]) == -1)
+        {
+            int saved_errno = errno;
+            for (b = 0; b < a; b++)
+            {
+                close(pipes[b][0]);
+                close(pipes[b][1]);
+            }
+            if (job != NULL)
+                job->active = 0;
+            snprintf(output, output_size, "pipe: %s\n", strerror(saved_errno));
+            return 1;
+        }
+    }
+
+    if (pipe(capture) == -1)
+    {
+        int saved_errno = errno;
+        close_pipeline_pipes(pipes, count - 1);
+        if (job != NULL)
+            job->active = 0;
+        snprintf(output, output_size, "pipe: %s\n", strerror(saved_errno));
+        return 1;
+    }
+
+    for (a = 0; a < count; a++)
+    {
+        pid_t child = fork();
+
+        if (child == -1)
+        {
+            int saved_errno = errno;
+            snprintf(output, output_size, "fork: %s\n", strerror(saved_errno));
+            result = 1;
+            fork_failed = 1;
+            break;
+        }
+
+        if (child == 0)
+        {
+            int fd;
+            int saved_errno;
+            pid_t group = (a == 0) ? 0 : getppid();
+            (void)group;
+            if (background)
+            {
+                /* Parent also calls setpgid to avoid a race. */
+                if (a == 0)
+                    (void)setpgid(0, 0);
+                else
+                    (void)setpgid(0, pids[0]);
+            }
+
+            close(capture[0]);
+
+            if (a > 0 && dup2(pipes[a - 1][0], STDIN_FILENO) == -1)
+                _exit(126);
+
+            if (a < count - 1)
+            {
+                if (dup2(pipes[a][1], STDOUT_FILENO) == -1)
+                    _exit(126);
+            }
+            else if (cmds[a].output_file == NULL)
+            {
+                if (dup2(capture[1], STDOUT_FILENO) == -1)
+                    _exit(126);
+            }
+
+            if (dup2(capture[1], STDERR_FILENO) == -1)
+                _exit(126);
+
+            for (b = 0; b < count - 1; b++)
+            {
+                close(pipes[b][0]);
+                close(pipes[b][1]);
+            }
+            close(capture[1]);
+
+            if (cmds[a].input_file != NULL)
+            {
+                fd = open(cmds[a].input_file, O_RDONLY);
+                if (fd == -1)
+                {
+                    dprintf(STDERR_FILENO, "%s: %s\n",
+                            cmds[a].input_file, strerror(errno));
+                    _exit(1);
+                }
+                if (dup2(fd, STDIN_FILENO) == -1)
+                    _exit(126);
+                close(fd);
+            }
+
+            if (cmds[a].output_file != NULL)
+            {
+                fd = open(cmds[a].output_file,
+                          O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                if (fd == -1)
+                {
+                    dprintf(STDERR_FILENO, "%s: %s\n",
+                            cmds[a].output_file, strerror(errno));
+                    _exit(1);
+                }
+                if (dup2(fd, STDOUT_FILENO) == -1)
+                    _exit(126);
+                close(fd);
+            }
+
+            execvp(cmds[a].args[0], cmds[a].args);
+            saved_errno = errno;
+            dprintf(STDERR_FILENO, "terminator: %s: %s\n",
+                    cmds[a].args[0], strerror(saved_errno));
+            _exit(saved_errno == ENOENT ? 127 : 126);
+        }
+
+        if (used == 0)
+            (void)setpgid(child, child);
+        else
+            (void)setpgid(child, pids[0]);
+
+        pids[used++] = child;
+
+        if (!background && used == 1)
+            foreground_pgid = child;
+    }
+
+    close_pipeline_pipes(pipes, count - 1);
+    close(capture[1]);
+
+    if (fork_failed)
+    {
+        if (background && used > 0)
+            (void)kill(-pids[0], SIGTERM);
+        else
+            for (a = 0; a < used; a++)
+                (void)kill(pids[a], SIGTERM);
+    }
+
+    if (background && !fork_failed)
+    {
+        int flags = fcntl(capture[0], F_GETFL, 0);
+        if (flags == -1 || fcntl(capture[0], F_SETFL, flags | O_NONBLOCK) == -1)
+        {
+            (void)kill(-pids[0], SIGTERM);
+            close(capture[0]);
+            job->active = 0;
+            snprintf(output, output_size, "fcntl: %s\n", strerror(errno));
+            return 1;
+        }
+
+        job->pgid = pids[0];
+        job->process_count = used;
+        job->output_fd = capture[0];
+        for (a = 0; a < used; a++)
+        {
+            job->pids[a] = pids[a];
+            job->alive[a] = 1;
+        }
+        snprintf(output, output_size, "[%d] %ld\n",
+                 job->id, (long)job->pgid);
+        return 0;
+    }
+
+    /* Foreground commands still use the original synchronous behavior. */
+    for (;;)
+    {
+        n = read(capture[0], buffer, sizeof(buffer));
+        if (n > 0)
+        {
+            size_t available = (size_t)output_size - 1 - total;
+            size_t copy_size = (size_t)n;
+            if (copy_size > available)
+                copy_size = available;
+            if (copy_size > 0)
+            {
+                memcpy(output + total, buffer, copy_size);
+                total += copy_size;
+                output[total] = '\0';
+            }
+            continue;
+        }
+        if (n == 0)
+            break;
+        if (errno == EINTR)
+            continue;
+        if (!fork_failed && total < (size_t)output_size - 1)
+            snprintf(output + total, output_size - (int)total,
+                     "read: %s\n", strerror(errno));
+        result = 1;
+        break;
+    }
+    close(capture[0]);
+
+    for (a = 0; a < used; a++)
+    {
+        if (wait_for_child(pids[a], &status) == -1)
+        {
+            result = 1;
+            continue;
+        }
+        if (a == used - 1 && !fork_failed)
+        {
+            if (WIFEXITED(status))
+                result = WEXITSTATUS(status);
+            else if (WIFSIGNALED(status))
+                result = 128 + WTERMSIG(status);
+            else
+                result = 1;
+        }
+    }
+    foreground_pgid = 0;
+    return result;
+}
+
+/* Drain background output and reap children without blocking. */
+int shell_poll_jobs(char *output, int output_size)
+{
+    int a, b, added = 0;
+    size_t used = 0;
+    char buffer[1024];
+
+    if (output == NULL || output_size <= 0)
+        return 0;
+    output[0] = '\0';
+
+    for (a = 0; a < SHELL_MAX_JOBS; a++)
+    {
+        Job *job = &jobs[a];
+        if (!job->active)
+            continue;
+
+        if (job->output_fd >= 0)
+        {
+            for (;;)
+            {
+                ssize_t n = read(job->output_fd, buffer, sizeof(buffer) - 1);
+                if (n > 0)
+                {
+                    buffer[n] = '\0';
+                    append_text(output, output_size, &used, buffer);
+                    added = 1;
+                    continue;
+                }
+                if (n == 0)
+                {
+                    close(job->output_fd);
+                    job->output_fd = -1;
+                }
+                else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                {
+                    close(job->output_fd);
+                    job->output_fd = -1;
+                }
+                if (n < 0 && errno == EINTR)
+                    continue;
+                break;
+            }
+        }
+
+        for (b = 0; b < job->process_count; b++)
+        {
+            if (!job->alive[b])
+                continue;
+            int status;
+            pid_t r = waitpid(job->pids[b], &status, WNOHANG);
+            if (r == job->pids[b] || (r == -1 && errno == ECHILD))
+                job->alive[b] = 0;
+        }
+
+        {
+            int any_alive = 0;
+            for (b = 0; b < job->process_count; b++)
+                if (job->alive[b])
+                    any_alive = 1;
+
+            if (!any_alive && job->output_fd == -1)
+            {
+                char line[128];
+                snprintf(line, sizeof(line), "[%d] Done\n", job->id);
+                append_text(output, output_size, &used, line);
+                added = 1;
+                job->active = 0;
+            }
+        }
+    }
+    return added;
+}
+/* Find a job using its ID. ID 0 means the latest active job. */
+static Job *find_job(int id)
+{
+    int a;
+    Job *latest = NULL;
+
+    for (a = 0; a < SHELL_MAX_JOBS; a++)
+    {
+        if (!jobs[a].active)
+            continue;
+
+        if (id > 0 && jobs[a].id == id)
+            return &jobs[a];
+
+        if (id == 0 &&
+            (latest == NULL || jobs[a].id > latest->id))
+        {
+            latest = &jobs[a];
+        }
+    }
+
+    return latest;
+}
+
+/* Resume a stopped job in the background. */
+int shell_bg(int job_id, char *output, int output_size)
+{
+    Job *job = find_job(job_id);
+
+    if (job == NULL)
+    {
+        snprintf(output, output_size,
+                 "bg: no such active job\n");
+        return 1;
+    }
+
+    if (kill(-job->pgid, SIGCONT) == -1)
+    {
+        snprintf(output, output_size,
+                 "bg: %s\n", strerror(errno));
+        return 1;
+    }
+
+    job->background = 1;
+
+    snprintf(output, output_size,
+             "[%d] continued in background: %s\n",
+             job->id, job->command);
+
+    return 0;
+}
+
+/* Bring a background job to the foreground. */
+int shell_fg(int job_id, char *output, int output_size)
+{
+    Job *job = find_job(job_id);
+
+    if (job == NULL)
+    {
+        snprintf(output, output_size,
+                 "fg: no such active job\n");
+        return 1;
+    }
+
+    if (kill(-job->pgid, SIGCONT) == -1 && errno != ESRCH)
+    {
+        snprintf(output, output_size,
+                 "fg: %s\n", strerror(errno));
+        return 1;
+    }
+
+    /*
+     * Full foreground waiting and terminal signal handling
+     * will be implemented in the next step.
+     */
+    job->background = 0;
+
+    snprintf(output, output_size,
+             "[%d] brought to foreground: %s\n",
+             job->id, job->command);
+
+    return 0;
+}
+void shell_handle_signal(int signal_number)
+{
+    if (foreground_pgid > 0)
+    {
+        if (kill(-foreground_pgid, signal_number) == -1)
+        {
+            perror("kill");
+        }
+
+        return;
+    }
+
+    int a;
+
+    for (a = 0; a < SHELL_MAX_JOBS; a++)
+    {
+        if (jobs[a].active &&
+            !jobs[a].background &&
+            jobs[a].pgid > 0)
+        {
+            if (kill(-jobs[a].pgid, signal_number) == -1)
+            {
+                perror("kill");
+            }
+
+            return;
+        }
+    }
+}
+void shell_jobs(char *output, int output_size)
+{
+    int a;
+    size_t used = 0;
+    char line[256];
+
+    if (output == NULL || output_size <= 0)
+        return;
+    output[0] = '\0';
+
+    for (a = 0; a < SHELL_MAX_JOBS; a++)
+    {
+        if (!jobs[a].active)
+            continue;
+        snprintf(line, sizeof(line), "[%d] Running %.220s\n",
+                 jobs[a].id, jobs[a].command);
+        append_text(output, output_size, &used, line);
+    }
+    if (used == 0)
+        snprintf(output, output_size, "No active jobs\n");
+}
+
+/* Public function called by the X11 GUI. */
+void run_command(const char *command, char *output,
+                 int output_size, int *exit_status)
+{
+    char storage[MAX_COMMAND];
+    Command cmds[MAX_COMMANDS];
+
+    int handled = 0;
+    int count;
+    int result;
+
+    if (output == NULL || exit_status == NULL ||
+        command == NULL || output_size <= 0)
+        return;
+
+    output[0] = '\0';
+
+    if (strlen(command) >= sizeof(storage))
+    {
+        snprintf(output, output_size,
+                 "terminator: command too long\n");
+
+        last_status = 2;
+        *exit_status = last_status;
+        return;
+    }
+
+    strcpy(storage, command);
+
+    count = parse_pipeline(storage, cmds, MAX_COMMANDS);
+
+    if (count == 0)
+    {
+        *exit_status = last_status;
+        return;
+    }
+
+    if (count < 0)
+    {
+        snprintf(output, output_size,
+                 "terminator: syntax error\n");
+
+        last_status = 2;
+        *exit_status = last_status;
+        return;
+    }
+
+    /* Built-ins run in the shell process when standalone. */
+    if (count == 1 &&
+        cmds[0].input_file == NULL &&
+        cmds[0].output_file == NULL)
+    {
+        result = run_builtin(&cmds[0], output,
+                             output_size, &handled);
+
+        if (handled)
+        {
+            last_status = result;
+            *exit_status = last_status;
+            return;
+        }
+    }
+
+    result = execute_pipeline(cmds, count, output, output_size);
+
+    last_status = result;
+    *exit_status = last_status;
+}
