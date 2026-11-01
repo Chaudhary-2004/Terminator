@@ -1,13 +1,24 @@
-# Compiled executable
-terminator
+# Backup files
+*.backup
+*.pre-dualmode
+*.pre-multiwatch
+*.task*-backup*
 
-# Object files
+# Compiled files
+terminator
 *.o
 
-# Command history
-.terminator_history
-
-# Debug files
-core
-core.*
- 
+# Temporary test files
+active
+append.txt
+command,
+input.txt
+last_start
+output*
+pid
+pipe_fd
+reaped
+result.txt
+running
+sorted.txt
+test.txt
