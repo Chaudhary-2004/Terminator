@@ -28,7 +28,7 @@
 #define TAB_BAR_HEIGHT 58
 
 #define RUNTIME_ASYNC_STATUS (-998)
-#define RUNTIME_EXIT_STATUS  (-999)
+#define RUNTIME_EXIT_STATUS (-999)
 
 static Display *d;
 static Window w;
@@ -70,7 +70,6 @@ static int active_tab = 0;
 static TerminatorMode active_mode = TERMINATOR_THREAD_MODE;
 static int gui_exit_requested = 0;
 
-
 /* =========================================================
    SHARED HISTORY
    ========================================================= */
@@ -89,7 +88,6 @@ static char (*history)[GUI_MAX_INPUT] = NULL;
 
 #define history_count (shared_history->count)
 
-
 static int initialize_shared_history(void)
 {
     shared_history = mmap(
@@ -98,8 +96,7 @@ static int initialize_shared_history(void)
         PROT_READ | PROT_WRITE,
         MAP_SHARED | MAP_ANONYMOUS,
         -1,
-        0
-    );
+        0);
 
     if (shared_history == MAP_FAILED)
     {
@@ -121,7 +118,6 @@ static int initialize_shared_history(void)
     return 0;
 }
 
-
 static void destroy_shared_history(void)
 {
     if (!shared_history)
@@ -135,7 +131,6 @@ static void destroy_shared_history(void)
     history = NULL;
 }
 
-
 /* =========================================================
    TAB HELPERS
    ========================================================= */
@@ -144,7 +139,6 @@ static Tab *current_tab(void)
 {
     return &tabs[active_tab];
 }
-
 
 static void append_output_to(Tab *t, const char *text)
 {
@@ -170,8 +164,7 @@ static void append_output_to(Tab *t, const char *text)
             memmove(
                 t->output,
                 t->output + old_length - keep,
-                keep
-            );
+                keep);
 
             t->output[keep] = '\0';
         }
@@ -194,12 +187,10 @@ static void append_output_to(Tab *t, const char *text)
     t->output[used + length] = '\0';
 }
 
-
 static void append_output(const char *text)
 {
     append_output_to(current_tab(), text);
 }
-
 
 /* =========================================================
    HISTORY
@@ -233,8 +224,7 @@ static void save_history(const char *command)
         memmove(
             history,
             history + 1,
-            sizeof(history[0]) * (HISTORY_SIZE - 1)
-        );
+            sizeof(history[0]) * (HISTORY_SIZE - 1));
 
         history_count--;
     }
@@ -243,8 +233,7 @@ static void save_history(const char *command)
         history[history_count],
         sizeof(history[history_count]),
         "%s",
-        command
-    );
+        command);
 
     history_count++;
 
@@ -256,8 +245,7 @@ static void save_history(const char *command)
             sizeof(path),
             "%s/%s",
             home,
-            HISTORY_FILE
-        ) < (int)sizeof(path))
+            HISTORY_FILE) < (int)sizeof(path))
     {
         fp = fopen(path, "a");
 
@@ -271,6 +259,30 @@ static void save_history(const char *command)
     sem_post(&shared_history->lock);
 }
 
+static void display_history(Tab *t)
+{
+    char line[GUI_MAX_INPUT + 32];
+    int a;
+
+    if (!shared_history)
+        return;
+
+    sem_wait(&shared_history->lock);
+
+    for (a = 0; a < history_count; a++)
+    {
+        snprintf(
+            line,
+            sizeof(line),
+            "%4d  %s\n",
+            a + 1,
+            history[a]);
+
+        append_output_to(t, line);
+    }
+
+    sem_post(&shared_history->lock);
+}
 
 static void load_history(void)
 {
@@ -318,8 +330,7 @@ static void load_history(void)
             memmove(
                 history,
                 history + 1,
-                sizeof(history[0]) * (HISTORY_SIZE - 1)
-            );
+                sizeof(history[0]) * (HISTORY_SIZE - 1));
 
             history_count--;
         }
@@ -328,8 +339,7 @@ static void load_history(void)
             history[history_count],
             sizeof(history[history_count]),
             "%s",
-            line
-        );
+            line);
 
         history_count++;
     }
@@ -341,7 +351,6 @@ static void load_history(void)
 
     fclose(fp);
 }
-
 
 static int find_history_match(const char *query, int start)
 {
@@ -362,7 +371,6 @@ static int find_history_match(const char *query, int start)
     return -1;
 }
 
-
 /* =========================================================
    TEXT DRAWING
    ========================================================= */
@@ -377,7 +385,6 @@ static int measure_text(const char *text, int length)
 
     return length * 8;
 }
-
 
 static int wrapped_chunk_length(
     const char *text,
@@ -398,7 +405,6 @@ static int wrapped_chunk_length(
     return fit > 0 ? fit : 1;
 }
 
-
 static void draw_tab_bar(void)
 {
     int a;
@@ -413,8 +419,7 @@ static void draw_tab_bar(void)
         10,
         17,
         "Ctrl+T: New | Ctrl+Tab: Next | Ctrl+W: Close",
-        46
-    );
+        46);
 
     for (a = 0; a < tab_count; a++)
     {
@@ -423,8 +428,7 @@ static void draw_tab_bar(void)
             sizeof(label),
             "%sTab %d",
             a == active_tab ? "[*] " : "[ ] ",
-            a + 1
-        );
+            a + 1);
 
         XDrawString(
             d,
@@ -433,8 +437,7 @@ static void draw_tab_bar(void)
             x,
             42,
             label,
-            (int)strlen(label)
-        );
+            (int)strlen(label));
 
         x += (int)strlen(label) * 8 + 12;
     }
@@ -446,11 +449,8 @@ static void draw_tab_bar(void)
         0,
         52,
         window_width,
-        52
-    );
+        52);
 }
-
-
 
 static int draw_output(int max_lines, int start_y)
 {
@@ -491,8 +491,7 @@ static int draw_output(int max_lines, int start_y)
                 int chunk = wrapped_chunk_length(
                     t->output + a,
                     remaining,
-                    max_width
-                );
+                    max_width);
 
                 line_start[total_lines] = a;
                 line_length[total_lines] = chunk;
@@ -526,8 +525,7 @@ static int draw_output(int max_lines, int start_y)
                 d, w, g,
                 10, y,
                 t->output + line_start[a],
-                line_length[a]
-            );
+                line_length[a]);
         }
 
         y += LINE_HEIGHT;
@@ -536,7 +534,6 @@ static int draw_output(int max_lines, int start_y)
     /* Return the next free baseline, so the prompt follows output. */
     return y;
 }
-
 
 static void redraw(void)
 {
@@ -554,14 +551,13 @@ static void redraw(void)
     if (t->search_mode)
     {
         const char *match = (t->search_index >= 0)
-            ? history[t->search_index]
-            : "(no match)";
+                                ? history[t->search_index]
+                                : "(no match)";
 
         snprintf(
             prompt, sizeof(prompt),
             "(reverse-i-search)`%.100s': %.1000s",
-            t->search_query, match
-        );
+            t->search_query, match);
     }
     else
     {
@@ -586,8 +582,7 @@ static void redraw(void)
         while (remaining > 0)
         {
             int chunk = wrapped_chunk_length(
-                prompt + offset, remaining, max_width
-            );
+                prompt + offset, remaining, max_width);
             offset += chunk;
             remaining -= chunk;
             prompt_lines++;
@@ -614,15 +609,13 @@ static void redraw(void)
         while (remaining > 0)
         {
             int chunk = wrapped_chunk_length(
-                prompt + offset, remaining, max_width
-            );
+                prompt + offset, remaining, max_width);
 
             XDrawString(
                 d, w, g,
                 10, prompt_y,
                 prompt + offset,
-                chunk
-            );
+                chunk);
 
             offset += chunk;
             remaining -= chunk;
@@ -632,7 +625,6 @@ static void redraw(void)
 
     XFlush(d);
 }
-
 
 /* =========================================================
    WORKER COMMUNICATION
@@ -649,8 +641,7 @@ static void start_foreground_worker(Tab *t, const char *command)
     {
         append_output_to(
             t,
-            "A command is already running in this tab.\n"
-        );
+            "A command is already running in this tab.\n");
 
         return;
     }
@@ -659,8 +650,7 @@ static void start_foreground_worker(Tab *t, const char *command)
     {
         append_output_to(
             t,
-            "Tab shell worker is not available.\n"
-        );
+            "Tab shell worker is not available.\n");
 
         return;
     }
@@ -669,8 +659,7 @@ static void start_foreground_worker(Tab *t, const char *command)
     {
         append_output_to(
             t,
-            "Could not send command to this tab's shell worker.\n"
-        );
+            "Could not send command to this tab's shell worker.\n");
 
         return;
     }
@@ -688,7 +677,6 @@ static void start_foreground_worker(Tab *t, const char *command)
          command[10] == '\t' ||
          command[10] == '[');
 }
-
 
 /*
  * Poll all tab workers, not only tabs with a foreground command.
@@ -723,8 +711,7 @@ static void poll_foreground_workers(void)
                 &t->runtime,
                 output,
                 sizeof(output),
-                &status
-            );
+                &status);
 
             if (result == 0)
                 break;
@@ -735,8 +722,7 @@ static void poll_foreground_workers(void)
                 {
                     append_output_to(
                         t,
-                        "Shell worker disconnected.\n"
-                    );
+                        "Shell worker disconnected.\n");
                 }
 
                 t->command_running = 0;
@@ -794,7 +780,6 @@ static void poll_foreground_workers(void)
         redraw();
 }
 
-
 /* =========================================================
    COMMAND EXECUTION
    ========================================================= */
@@ -813,8 +798,7 @@ static void execute_current_command(void)
             command,
             sizeof(command),
             "%s",
-            t->input
-        );
+            t->input);
 
         save_history(command);
 
@@ -823,16 +807,22 @@ static void execute_current_command(void)
             sizeof(line),
             "%s%s\n",
             PROMPT,
-            command
-        );
+            command);
 
         append_output(line);
 
-        /*
-         * All commands, including multiWatch, fg, bg and jobs,
-         * go through the tab's worker.
-         */
-        start_foreground_worker(t, command);
+        /* Handle history as a GUI built-in command. */
+        if (strcmp(command, "history") == 0)
+        {
+            display_history(t);
+        }
+        else
+        {
+            /*
+             * All other commands go through the tab's worker.
+             */
+            start_foreground_worker(t, command);
+        }
     }
 
     t->input[0] = '\0';
@@ -840,7 +830,6 @@ static void execute_current_command(void)
 
     t->history_position = history_count;
 }
-
 
 /* =========================================================
    TAB MANAGEMENT
@@ -880,14 +869,12 @@ static void open_tab(void)
         tabs[new_index].output,
         sizeof(tabs[new_index].output),
         "Welcome to Terminator - Tab %d\n",
-        new_index + 1
-    );
+        new_index + 1);
 
     tab_count++;
 
     active_tab = new_index;
 }
-
 
 static void close_active_tab(void)
 {
@@ -898,8 +885,7 @@ static void close_active_tab(void)
         snprintf(
             current_tab()->output,
             sizeof(current_tab()->output),
-            "This is the last tab. Close the window to exit.\n"
-        );
+            "This is the last tab. Close the window to exit.\n");
 
         return;
     }
@@ -912,8 +898,7 @@ static void close_active_tab(void)
     memset(
         &tabs[tab_count - 1],
         0,
-        sizeof(tabs[tab_count - 1])
-    );
+        sizeof(tabs[tab_count - 1]));
 
     tab_count--;
 
@@ -921,13 +906,11 @@ static void close_active_tab(void)
         active_tab = tab_count - 1;
 }
 
-
 static void next_tab(void)
 {
     if (tab_count > 1)
         active_tab = (active_tab + 1) % tab_count;
 }
-
 
 /* =========================================================
    KEYBOARD SIGNALS
@@ -950,7 +933,6 @@ static void handle_ctrl_c(Tab *t)
     }
 }
 
-
 static void handle_ctrl_z(Tab *t)
 {
     if (t->command_running)
@@ -960,7 +942,6 @@ static void handle_ctrl_z(Tab *t)
         append_output_to(t, "^Z\n");
     }
 }
-
 
 /* =========================================================
    MAIN GUI
@@ -1031,24 +1012,21 @@ void run_gui(TerminatorMode mode)
         WINDOW_HEIGHT,
         1,
         BlackPixel(d, s),
-        BlackPixel(d, s)
-    );
+        BlackPixel(d, s));
 
     XStoreName(
         d,
         w,
         mode == TERMINATOR_PROCESS_MODE
             ? "Terminator - Process Mode"
-            : "Terminator - Thread Mode"
-    );
+            : "Terminator - Thread Mode");
 
     XSelectInput(
         d,
         w,
         ExposureMask |
-        KeyPressMask |
-        StructureNotifyMask
-    );
+            KeyPressMask |
+            StructureNotifyMask);
 
     g = XCreateGC(d, w, 0, NULL);
 
@@ -1057,8 +1035,7 @@ void run_gui(TerminatorMode mode)
     XSetForeground(
         d,
         g,
-        WhitePixel(d, s)
-    );
+        WhitePixel(d, s));
 
     XMapWindow(d, w);
 
@@ -1066,8 +1043,7 @@ void run_gui(TerminatorMode mode)
         tabs[0].output,
         sizeof(tabs[0].output),
         "Welcome to Terminator!\n"
-        "Type a Linux command and press Enter.\n"
-    );
+        "Type a Linux command and press Enter.\n");
 
     load_history();
 
@@ -1098,8 +1074,7 @@ void run_gui(TerminatorMode mode)
                 &read_fds,
                 NULL,
                 NULL,
-                &timeout
-            );
+                &timeout);
         }
 
         /*
@@ -1135,8 +1110,7 @@ void run_gui(TerminatorMode mode)
                 key,
                 sizeof(key),
                 &k,
-                NULL
-            );
+                NULL);
 
             t = current_tab();
 
@@ -1214,8 +1188,7 @@ void run_gui(TerminatorMode mode)
                         t->search_saved_input,
                         sizeof(t->search_saved_input),
                         "%s",
-                        t->input
-                    );
+                        t->input);
 
                     t->search_query[0] = '\0';
                     t->search_index = -1;
@@ -1225,15 +1198,13 @@ void run_gui(TerminatorMode mode)
                 {
                     t->search_index = find_history_match(
                         t->search_query,
-                        t->search_index - 1
-                    );
+                        t->search_index - 1);
                 }
                 else if (t->search_index == -1)
                 {
                     t->search_index = find_history_match(
                         t->search_query,
-                        history_count - 1
-                    );
+                        history_count - 1);
                 }
 
                 redraw();
@@ -1252,8 +1223,7 @@ void run_gui(TerminatorMode mode)
                         t->input,
                         sizeof(t->input),
                         "%s",
-                        t->search_saved_input
-                    );
+                        t->search_saved_input);
 
                     t->input_len = (int)strlen(t->input);
                 }
@@ -1266,8 +1236,7 @@ void run_gui(TerminatorMode mode)
 
                     t->search_index = find_history_match(
                         t->search_query,
-                        history_count - 1
-                    );
+                        history_count - 1);
                 }
                 else if (k == XK_Return || k == XK_KP_Enter)
                 {
@@ -1277,8 +1246,7 @@ void run_gui(TerminatorMode mode)
                             t->input,
                             sizeof(t->input),
                             "%s",
-                            history[t->search_index]
-                        );
+                            history[t->search_index]);
 
                         t->input_len = (int)strlen(t->input);
                     }
@@ -1298,8 +1266,7 @@ void run_gui(TerminatorMode mode)
 
                     t->search_index = find_history_match(
                         t->search_query,
-                        history_count - 1
-                    );
+                        history_count - 1);
                 }
 
                 redraw();
@@ -1319,8 +1286,7 @@ void run_gui(TerminatorMode mode)
                         t->input,
                         sizeof(t->input),
                         "%s",
-                        history[t->history_position]
-                    );
+                        history[t->history_position]);
 
                     t->input_len = (int)strlen(t->input);
                 }
@@ -1341,8 +1307,7 @@ void run_gui(TerminatorMode mode)
                         t->input,
                         sizeof(t->input),
                         "%s",
-                        history[t->history_position]
-                    );
+                        history[t->history_position]);
 
                     t->input_len = (int)strlen(t->input);
                 }
