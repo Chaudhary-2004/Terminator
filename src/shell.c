@@ -402,6 +402,7 @@ static void stream_new_output(
     *used = previous_used;
 }
 
+/*Foreground JOB Polling*/
 static int monitor_job(
     Job *job,
     char *output,
@@ -1793,6 +1794,7 @@ static int execute_pipeline(
                 close(fd);
             }
 
+          
             execvp(
                 cmds[a].args[0],
                 cmds[a].args);
