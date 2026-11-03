@@ -17,10 +17,6 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 
-/* =========================================================
-   CONSTANTS
-   ========================================================= */
-
 #define MW_MAX 16
 #define MW_INTERVAL 2
 #define MW_BUFFER 16384
@@ -54,7 +50,6 @@ typedef struct
 
 } Job;
 
-
 typedef struct
 {
     char command[MAX_COMMAND];
@@ -72,7 +67,6 @@ typedef struct
     size_t output_len;
 
 } MultiWatchCommand;
-
 
 /* =========================================================
    WORKER-OWNED SHELL STATE
@@ -96,13 +90,21 @@ static _Thread_local pid_t foreground_pgid = 0;
 
 static _Thread_local int mw_active = 0;
 
+static _Thread_local ShellOutputCallback output_callback = NULL;
+static _Thread_local void *output_callback_context = NULL;
 /*
  * The asynchronous signal handler only writes this variable.
  * The worker processes it later in normal execution.
  */
 static _Thread_local volatile sig_atomic_t pending_signal = 0;
 
-
+void shell_set_output_callback(
+    ShellOutputCallback callback,
+    void *context)
+{
+    output_callback = callback;
+    output_callback_context = context;
+}
 /* =========================================================
    GENERAL HELPERS
    ========================================================= */
@@ -136,7 +138,6 @@ static void append_text(
     output[*used] = '\0';
 }
 
-
 static void close_pipes(int pipes[][2], int count)
 {
     int a;
@@ -154,7 +155,6 @@ static void close_pipes(int pipes[][2], int count)
     }
 }
 
-
 static int set_nonblocking(int fd)
 {
     int flags;
@@ -166,7 +166,6 @@ static int set_nonblocking(int fd)
 
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
-
 
 static int all_processes_done(Job *job)
 {
@@ -180,7 +179,6 @@ static int all_processes_done(Job *job)
 
     return 1;
 }
-
 
 static int all_processes_stopped(Job *job)
 {
@@ -201,7 +199,6 @@ static int all_processes_stopped(Job *job)
     return found;
 }
 
-
 /* =========================================================
    SIGNAL HANDLING
    ========================================================= */
@@ -216,7 +213,6 @@ void shell_handle_signal(int signal_number)
 {
     pending_signal = signal_number;
 }
-
 
 /*
  * Called by the worker during normal execution.
@@ -247,12 +243,10 @@ void shell_process_pending_signal(void)
     }
 }
 
-
 int shell_foreground_running(void)
 {
     return foreground_pgid > 0;
 }
-
 
 /* =========================================================
    JOB TABLE
@@ -281,7 +275,6 @@ static Job *allocate_job(void)
     return NULL;
 }
 
-
 static Job *find_job(int id)
 {
     int a;
@@ -294,7 +287,6 @@ static Job *find_job(int id)
 
     return NULL;
 }
-
 
 static void remove_job(Job *job)
 {
@@ -311,7 +303,6 @@ static void remove_job(Job *job)
 
     job->output_fd = -1;
 }
-
 
 /* =========================================================
    JOB OUTPUT COLLECTION
@@ -333,8 +324,7 @@ static void collect_job_output(
         ssize_t n = read(
             job->output_fd,
             buffer,
-            sizeof(buffer)
-        );
+            sizeof(buffer));
 
         if (n > 0)
         {
@@ -382,7 +372,6 @@ static void collect_job_output(
     }
 }
 
-
 /* =========================================================
    WAIT FOR A JOB
 
@@ -395,6 +384,23 @@ static void collect_job_output(
      3. Child stopping
      4. Pending Ctrl+C / Ctrl+Z signals
    ========================================================= */
+static void stream_new_output(
+    char *output,
+    size_t *used,
+    size_t previous_used)
+{
+    if (!output_callback || *used <= previous_used)
+        return;
+
+    output_callback(
+        output + previous_used,
+        output_callback_context);
+
+    /* Remove the bytes that were already streamed. */
+    output[previous_used] = '\0';
+
+    *used = previous_used;
+}
 
 static int monitor_job(
     Job *job,
@@ -428,12 +434,20 @@ static int monitor_job(
         /*
          * Read available output without blocking.
          */
-        collect_job_output(
-            job,
-            output,
-            output_size,
-            &used
-        );
+        {
+            size_t previous_used = used;
+
+            collect_job_output(
+                job,
+                output,
+                output_size,
+                &used);
+
+            stream_new_output(
+                output,
+                &used,
+                previous_used);
+        }
 
         /*
          * Check each child.
@@ -450,8 +464,7 @@ static int monitor_job(
             result = waitpid(
                 job->pids[a],
                 &status,
-                WNOHANG | WUNTRACED | WCONTINUED
-            );
+                WNOHANG | WUNTRACED | WCONTINUED);
 
             if (result == job->pids[a])
             {
@@ -494,12 +507,20 @@ static int monitor_job(
             /*
              * Drain remaining pipe output.
              */
-            collect_job_output(
-                job,
-                output,
-                output_size,
-                &used
-            );
+            {
+                size_t previous_used = used;
+
+                collect_job_output(
+                    job,
+                    output,
+                    output_size,
+                    &used);
+
+                stream_new_output(
+                    output,
+                    &used,
+                    previous_used);
+            }
 
             if (job->output_fd >= 0)
             {
@@ -536,15 +557,13 @@ static int monitor_job(
                     line,
                     sizeof(line),
                     "\n[%d] Stopped\n",
-                    job->id
-                );
+                    job->id);
 
                 append_text(
                     output,
                     output_size,
                     &used,
-                    line
-                );
+                    line);
             }
 
             return 128 + SIGTSTP;
@@ -571,7 +590,6 @@ static int monitor_job(
         }
     }
 }
-
 
 /* =========================================================
    MULTIWATCH PARSER
@@ -652,7 +670,6 @@ static int parse_mw(
     }
 }
 
-
 /* =========================================================
    MULTIWATCH START
    ========================================================= */
@@ -699,8 +716,7 @@ static int start_mw_command(int index)
             "sh",
             "-c",
             mw[index].command,
-            (char *)NULL
-        );
+            (char *)NULL);
 
         _exit(127);
     }
@@ -745,7 +761,6 @@ static int start_mw_command(int index)
     return 0;
 }
 
-
 int shell_multiwatch_start(
     const char *command,
     char *output,
@@ -767,8 +782,7 @@ int shell_multiwatch_start(
         snprintf(
             output,
             output_size,
-            "multiWatch: already running\n"
-        );
+            "multiWatch: already running\n");
 
         return 1;
     }
@@ -780,8 +794,7 @@ int shell_multiwatch_start(
         snprintf(
             output,
             output_size,
-            "Usage: multiWatch [\"cmd1\", \"cmd2\", ...]\n"
-        );
+            "Usage: multiWatch [\"cmd1\", \"cmd2\", ...]\n");
 
         return 1;
     }
@@ -797,8 +810,7 @@ int shell_multiwatch_start(
             mw[a].command,
             sizeof(mw[a].command),
             "%s",
-            parsed[a]
-        );
+            parsed[a]);
 
         mw[a].active = 1;
     }
@@ -817,8 +829,7 @@ int shell_multiwatch_start(
                 output,
                 output_size,
                 "multiWatch: %s\n",
-                strerror(saved_errno)
-            );
+                strerror(saved_errno));
 
             return 1;
         }
@@ -827,12 +838,10 @@ int shell_multiwatch_start(
     return 0;
 }
 
-
 int shell_multiwatch_active(void)
 {
     return mw_active;
 }
-
 
 /* =========================================================
    MULTIWATCH POLL
@@ -913,8 +922,7 @@ int shell_multiwatch_poll(char *output, int output_size)
                 ssize_t n = read(
                     item->pipe_fd,
                     buffer,
-                    sizeof(buffer)
-                );
+                    sizeof(buffer));
 
                 if (n > 0)
                 {
@@ -932,8 +940,7 @@ int shell_multiwatch_poll(char *output, int output_size)
                         memcpy(
                             item->output + item->output_len,
                             buffer,
-                            take
-                        );
+                            take);
 
                         item->output_len += take;
 
@@ -953,22 +960,19 @@ int shell_multiwatch_poll(char *output, int output_size)
                         "\"%s\", %ld:\n%s",
                         item->command,
                         (long)time(NULL),
-                        MW_SEPARATOR
-                    );
+                        MW_SEPARATOR);
 
                     append_text(
                         output,
                         output_size,
                         &used,
-                        header
-                    );
+                        header);
 
                     append_text(
                         output,
                         output_size,
                         &used,
-                        item->output
-                    );
+                        item->output);
 
                     if (item->output_len > 0 &&
                         item->output[item->output_len - 1] != '\n')
@@ -977,16 +981,14 @@ int shell_multiwatch_poll(char *output, int output_size)
                             output,
                             output_size,
                             &used,
-                            "\n"
-                        );
+                            "\n");
                     }
 
                     append_text(
                         output,
                         output_size,
                         &used,
-                        MW_SEPARATOR
-                    );
+                        MW_SEPARATOR);
 
                     close(item->pipe_fd);
 
@@ -1004,8 +1006,7 @@ int shell_multiwatch_poll(char *output, int output_size)
                         pid_t r = waitpid(
                             item->pid,
                             NULL,
-                            WNOHANG
-                        );
+                            WNOHANG);
 
                         if (r == item->pid ||
                             (r == -1 && errno == ECHILD))
@@ -1052,8 +1053,7 @@ int shell_multiwatch_poll(char *output, int output_size)
             pid_t r = waitpid(
                 item->pid,
                 NULL,
-                WNOHANG
-            );
+                WNOHANG);
 
             if (r == item->pid ||
                 (r == -1 && errno == ECHILD))
@@ -1074,15 +1074,13 @@ int shell_multiwatch_poll(char *output, int output_size)
                     sizeof(message),
                     "multiWatch: restart failed for \"%s\": %s\n",
                     item->command,
-                    strerror(errno)
-                );
+                    strerror(errno));
 
                 append_text(
                     output,
                     output_size,
                     &used,
-                    message
-                );
+                    message);
 
                 item->last_start = now;
 
@@ -1093,7 +1091,6 @@ int shell_multiwatch_poll(char *output, int output_size)
 
     return produced;
 }
-
 
 /* =========================================================
    MULTIWATCH STOP
@@ -1131,8 +1128,7 @@ void shell_multiwatch_stop(void)
             pid_t r = waitpid(
                 item->pid,
                 &status,
-                WNOHANG
-            );
+                WNOHANG);
 
             if (r == 0)
             {
@@ -1168,7 +1164,6 @@ void shell_multiwatch_stop(void)
     }
 }
 
-
 /* =========================================================
    BACKGROUND JOB POLLING
    ========================================================= */
@@ -1197,8 +1192,7 @@ int shell_poll_jobs(char *output, int output_size)
             job,
             output,
             output_size,
-            &used
-        );
+            &used);
 
         for (b = 0; b < job->process_count; b++)
         {
@@ -1212,8 +1206,7 @@ int shell_poll_jobs(char *output, int output_size)
             r = waitpid(
                 job->pids[b],
                 &status,
-                WNOHANG | WUNTRACED | WCONTINUED
-            );
+                WNOHANG | WUNTRACED | WCONTINUED);
 
             if (r == job->pids[b])
             {
@@ -1253,15 +1246,13 @@ int shell_poll_jobs(char *output, int output_size)
                 sizeof(line),
                 "\n[%d] Done: %s\n",
                 job->id,
-                job->command
-            );
+                job->command);
 
             append_text(
                 output,
                 output_size,
                 &used,
-                line
-            );
+                line);
 
             remove_job(job);
         }
@@ -1269,7 +1260,6 @@ int shell_poll_jobs(char *output, int output_size)
 
     return used > 0 ? 1 : 0;
 }
-
 
 /* =========================================================
    JOB LIST
@@ -1302,22 +1292,19 @@ void shell_jobs(char *output, int output_size)
                     : (jobs[a].background
                            ? "Running"
                            : "Foreground"),
-                jobs[a].command
-            );
+                jobs[a].command);
 
             append_text(
                 output,
                 output_size,
                 &used,
-                line
-            );
+                line);
         }
     }
 
     if (used == 0)
         snprintf(output, output_size, "No jobs.\n");
 }
-
 
 /* =========================================================
    BG COMMAND
@@ -1339,8 +1326,7 @@ int shell_bg(int job_id, char *output, int output_size)
         snprintf(
             output,
             output_size,
-            "bg: job not found\n"
-        );
+            "bg: job not found\n");
 
         return 1;
     }
@@ -1351,8 +1337,7 @@ int shell_bg(int job_id, char *output, int output_size)
             output,
             output_size,
             "bg: %s\n",
-            strerror(errno)
-        );
+            strerror(errno));
 
         return 1;
     }
@@ -1372,12 +1357,10 @@ int shell_bg(int job_id, char *output, int output_size)
         output,
         output_size,
         "[%d] continued in background\n",
-        job->id
-    );
+        job->id);
 
     return 0;
 }
-
 
 /* =========================================================
    FG COMMAND
@@ -1401,8 +1384,7 @@ int shell_fg(int job_id, char *output, int output_size)
         snprintf(
             output,
             output_size,
-            "fg: job not found\n"
-        );
+            "fg: job not found\n");
 
         return 1;
     }
@@ -1413,8 +1395,7 @@ int shell_fg(int job_id, char *output, int output_size)
             output,
             output_size,
             "fg: %s\n",
-            strerror(errno)
-        );
+            strerror(errno));
 
         return 1;
     }
@@ -1434,12 +1415,10 @@ int shell_fg(int job_id, char *output, int output_size)
         job,
         output,
         output_size,
-        1
-    );
+        1);
 
     return result;
 }
-
 
 /* =========================================================
    BUILT-IN COMMANDS
@@ -1472,8 +1451,7 @@ static int run_builtin(
             snprintf(
                 output,
                 output_size,
-                "cd: HOME is not set\n"
-            );
+                "cd: HOME is not set\n");
 
             return 1;
         }
@@ -1484,8 +1462,7 @@ static int run_builtin(
                 output,
                 output_size,
                 "cd: %s\n",
-                strerror(errno)
-            );
+                strerror(errno));
 
             return 1;
         }
@@ -1503,8 +1480,7 @@ static int run_builtin(
                 output,
                 output_size,
                 "pwd: %s\n",
-                strerror(errno)
-            );
+                strerror(errno));
 
             return 1;
         }
@@ -1513,8 +1489,7 @@ static int run_builtin(
             output,
             output_size,
             "%s\n",
-            cwd
-        );
+            cwd);
 
         return 0;
     }
@@ -1549,8 +1524,7 @@ static int run_builtin(
         return shell_multiwatch_start(
             "",
             output,
-            output_size
-        );
+            output_size);
     }
 
     if (strcmp(cmd->args[0], "exit") == 0)
@@ -1567,7 +1541,6 @@ static int run_builtin(
 
     return 0;
 }
-
 
 /* =========================================================
    PIPELINE EXECUTION
@@ -1618,8 +1591,7 @@ static int execute_pipeline(
         snprintf(
             output,
             output_size,
-            "shell: job table full\n"
-        );
+            "shell: job table full\n");
 
         return 1;
     }
@@ -1635,8 +1607,7 @@ static int execute_pipeline(
                 job->command,
                 " | ",
                 sizeof(job->command) -
-                    strlen(job->command) - 1
-            );
+                    strlen(job->command) - 1);
         }
 
         for (b = 0; cmds[a].args[b]; b++)
@@ -1647,16 +1618,14 @@ static int execute_pipeline(
                     job->command,
                     " ",
                     sizeof(job->command) -
-                        strlen(job->command) - 1
-                );
+                        strlen(job->command) - 1);
             }
 
             strncat(
                 job->command,
                 cmds[a].args[b],
                 sizeof(job->command) -
-                    strlen(job->command) - 1
-            );
+                    strlen(job->command) - 1);
         }
     }
 
@@ -1668,8 +1637,7 @@ static int execute_pipeline(
                 output,
                 output_size,
                 "pipe: %s\n",
-                strerror(errno)
-            );
+                strerror(errno));
 
             close_pipes(pipes, pipe_count);
 
@@ -1685,8 +1653,7 @@ static int execute_pipeline(
             output,
             output_size,
             "pipe: %s\n",
-            strerror(errno)
-        );
+            strerror(errno));
 
         close_pipes(pipes, pipe_count);
 
@@ -1777,8 +1744,7 @@ static int execute_pipeline(
             {
                 int fd = open(
                     cmds[a].input_file,
-                    O_RDONLY
-                );
+                    O_RDONLY);
 
                 if (fd == -1 ||
                     dup2(fd, STDIN_FILENO) == -1)
@@ -1787,8 +1753,7 @@ static int execute_pipeline(
                         STDERR_FILENO,
                         "%s: %s\n",
                         cmds[a].input_file,
-                        strerror(errno)
-                    );
+                        strerror(errno));
 
                     _exit(126);
                 }
@@ -1811,8 +1776,7 @@ static int execute_pipeline(
                 int fd = open(
                     cmds[a].output_file,
                     flags,
-                    0666
-                );
+                    0666);
 
                 if (fd == -1 ||
                     dup2(fd, STDOUT_FILENO) == -1)
@@ -1821,8 +1785,7 @@ static int execute_pipeline(
                         STDERR_FILENO,
                         "%s: %s\n",
                         cmds[a].output_file,
-                        strerror(errno)
-                    );
+                        strerror(errno));
 
                     _exit(126);
                 }
@@ -1832,15 +1795,13 @@ static int execute_pipeline(
 
             execvp(
                 cmds[a].args[0],
-                cmds[a].args
-            );
+                cmds[a].args);
 
             dprintf(
                 STDERR_FILENO,
                 "%s: %s\n",
                 cmds[a].args[0],
-                strerror(errno)
-            );
+                strerror(errno));
 
             _exit(errno == ENOENT ? 127 : 126);
         }
@@ -1881,8 +1842,7 @@ static int execute_pipeline(
             output,
             output_size,
             "fork: %s\n",
-            strerror(saved_errno)
-        );
+            strerror(saved_errno));
 
         return 1;
     }
@@ -1942,8 +1902,7 @@ static int execute_pipeline(
             sizeof(line),
             "[%d] %ld\n",
             job->id,
-            (long)job->pgid
-        );
+            (long)job->pgid);
 
         snprintf(output, output_size, "%s", line);
 
@@ -1961,10 +1920,8 @@ static int execute_pipeline(
         job,
         output,
         output_size,
-        1
-    );
+        1);
 }
-
 
 /* =========================================================
    RUN COMMAND
@@ -2004,8 +1961,7 @@ void run_command(
         snprintf(
             output,
             output_size,
-            "shell: command too long\n"
-        );
+            "shell: command too long\n");
 
         if (exit_status)
             *exit_status = 1;
@@ -2019,8 +1975,7 @@ void run_command(
         storage,
         sizeof(storage),
         "%s",
-        command
-    );
+        command);
 
     /*
      * Special handling for multiWatch because it requires
@@ -2035,8 +1990,7 @@ void run_command(
         result = shell_multiwatch_start(
             command,
             output,
-            output_size
-        );
+            output_size);
 
         last_status = result;
 
@@ -2049,8 +2003,7 @@ void run_command(
     count = parse_pipeline(
         storage,
         cmds,
-        MAX_COMMANDS
-    );
+        MAX_COMMANDS);
 
     if (count <= 0)
     {
@@ -2071,8 +2024,7 @@ void run_command(
             &cmds[0],
             output,
             output_size,
-            &handled
-        );
+            &handled);
 
         if (handled)
         {
@@ -2089,15 +2041,13 @@ void run_command(
         cmds,
         count,
         output,
-        output_size
-    );
+        output_size);
 
     last_status = result;
 
     if (exit_status)
         *exit_status = result;
 }
-
 
 /* =========================================================
    EXIT STATE

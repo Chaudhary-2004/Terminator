@@ -11,6 +11,16 @@ void run_command(
     int *exit_status
 );
 
+typedef void (*ShellOutputCallback)(
+    const char *output,
+    void *context
+);
+
+void shell_set_output_callback(
+    ShellOutputCallback callback,
+    void *context
+);
+
 /* Foreground process information. */
 int shell_foreground_running(void);
 

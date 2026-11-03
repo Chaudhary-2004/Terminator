@@ -19,7 +19,7 @@
 
 /* Reserved status for unsolicited background output. */
 #define RUNTIME_ASYNC_STATUS (-998)
-#define RUNTIME_EXIT_STATUS  (-999)
+#define RUNTIME_EXIT_STATUS (-999)
 
 typedef struct
 {
@@ -76,8 +76,7 @@ static int read_all(int fd, void *buffer, size_t length)
         ssize_t n = read(
             fd,
             (char *)buffer + used,
-            length - used
-        );
+            length - used);
 
         if (n > 0)
         {
@@ -110,8 +109,7 @@ static int write_all(int fd, const void *buffer, size_t length)
             fd,
             (const char *)buffer + used,
             length - used,
-            MSG_NOSIGNAL
-        );
+            MSG_NOSIGNAL);
 
         if (n > 0)
         {
@@ -151,6 +149,18 @@ static int send_response(
     }
 
     return 0;
+}
+
+static void stream_shell_output(
+    const char *output,
+    void *context)
+{
+    int fd = (int)(intptr_t)context;
+
+    send_response(
+        fd,
+        output,
+        RUNTIME_ASYNC_STATUS);
 }
 
 /*
@@ -234,8 +244,7 @@ static int handle_one_request(int fd, int thread_mode, char *thread_cwd)
             command,
             output,
             sizeof(output),
-            &status
-        );
+            &status);
 
         if (getcwd(thread_cwd, 4096) == NULL)
             thread_cwd[0] = '\0';
@@ -251,8 +260,7 @@ static int handle_one_request(int fd, int thread_mode, char *thread_cwd)
             command,
             output,
             sizeof(output),
-            &status
-        );
+            &status);
     }
 
     shell_process_pending_signal();
@@ -284,6 +292,9 @@ static void worker_loop(int fd, int thread_mode)
         close(fd);
         return;
     }
+    shell_set_output_callback(
+        stream_shell_output,
+        (void *)(intptr_t)fd);
 
     for (;;)
     {
@@ -331,7 +342,7 @@ static void worker_loop(int fd, int thread_mode)
 
     if (shell_multiwatch_active())
         shell_multiwatch_stop();
-
+    shell_set_output_callback(NULL, NULL);
     close(fd);
 }
 
@@ -517,8 +528,7 @@ int tab_runtime_poll(
                 memcpy(
                     output,
                     runtime->rx + sizeof(header),
-                    copy
-                );
+                    copy);
 
                 output[copy] = '\0';
 
@@ -528,8 +538,7 @@ int tab_runtime_poll(
                 memmove(
                     runtime->rx,
                     runtime->rx + target,
-                    runtime->rx_used - target
-                );
+                    runtime->rx_used - target);
 
                 runtime->rx_used -= target;
                 runtime->rx_needed = 0;
@@ -544,8 +553,7 @@ int tab_runtime_poll(
         n = read(
             runtime->fd,
             runtime->rx + runtime->rx_used,
-            sizeof(runtime->rx) - runtime->rx_used
-        );
+            sizeof(runtime->rx) - runtime->rx_used);
 
         if (n > 0)
         {
