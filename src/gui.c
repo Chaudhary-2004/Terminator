@@ -21,12 +21,13 @@
 #define GUI_MAX_INPUT 1024
 #define MAX_OUTPUT 16000
 #define LINE_HEIGHT 20
-#define PROMPT "user@terminator> "
+#define PROMPT "terminator@> "
 #define HISTORY_FILE ".terminator_history"
 #define HISTORY_SIZE 1000
 #define MAX_TABS 8
 #define TAB_BAR_HEIGHT 58
 
+#define RUNTIME_CWD_STATUS (-997)
 #define RUNTIME_ASYNC_STATUS (-998)
 #define RUNTIME_EXIT_STATUS (-999)
 
@@ -42,6 +43,7 @@ typedef struct
 {
     char input[GUI_MAX_INPUT];
     int input_len;
+    int cursor_pos; // Current cursor position
 
     char output[MAX_OUTPUT];
     int exit_status;
@@ -538,7 +540,7 @@ static int draw_output(int max_lines, int start_y)
 static void redraw(void)
 {
     Tab *t = current_tab();
-    char prompt[GUI_MAX_INPUT + 128];
+    char prompt[GUI_MAX_INPUT + 200];
     int length;
     int offset = 0;
     int max_width = window_width - 20;
@@ -561,7 +563,12 @@ static void redraw(void)
     }
     else
     {
-        snprintf(prompt, sizeof(prompt), "%s%s", PROMPT, t->input);
+        snprintf(
+            prompt,
+            sizeof(prompt),
+            "terminator@%.500s> %.600s",
+            t->cwd,
+            t->input);
     }
 
     /*
@@ -605,6 +612,9 @@ static void redraw(void)
     {
         offset = 0;
         int remaining = (int)strlen(prompt);
+        int prompt_length = remaining;
+        int cursor_offset = (int)strlen("terminator@") + (int)strlen(t->cwd) + 2 + t->cursor_pos;
+        int cursor_drawn = 0;
 
         while (remaining > 0)
         {
@@ -617,9 +627,43 @@ static void redraw(void)
                 prompt + offset,
                 chunk);
 
+            /*
+             * Draw the cursor at its character position.
+             * If it is exactly at a wrap boundary, the next
+             * visual line will draw it at x = 10.
+             */
+            if (!t->search_mode &&
+                !cursor_drawn &&
+                cursor_offset >= offset &&
+                (cursor_offset < offset + chunk ||
+                 (offset + chunk == prompt_length &&
+                  cursor_offset == prompt_length)))
+            {
+                int cursor_x = 10 + measure_text(
+                                        prompt + offset,
+                                        cursor_offset - offset);
+
+                XDrawLine(
+                    d, w, g,
+                    cursor_x, prompt_y - 14,
+                    cursor_x, prompt_y + 3);
+
+                cursor_drawn = 1;
+            }
+
             offset += chunk;
             remaining -= chunk;
             prompt_y += LINE_HEIGHT;
+        }
+
+        /* Empty prompt fallback (normally the prompt prefix is nonempty). */
+        if (!cursor_drawn && !t->search_mode)
+        {
+            int cursor_x = 10 + measure_text(prompt, prompt_length);
+            XDrawLine(
+                d, w, g,
+                cursor_x, prompt_y - LINE_HEIGHT - 14,
+                cursor_x, prompt_y - LINE_HEIGHT + 3);
         }
     }
 
@@ -733,6 +777,23 @@ static void poll_foreground_workers(void)
                 break;
             }
 
+            /*
+             * The worker sends the current directory as a separate
+             * response. Update the prompt, but never print this message
+             * as normal terminal output.
+             */
+            if (status == RUNTIME_CWD_STATUS)
+            {
+                snprintf(
+                    t->cwd,
+                    sizeof(t->cwd),
+                    "%.*s",
+                    (int)sizeof(t->cwd) - 1,
+                    output);
+                changed = 1;
+                continue;
+            }
+
             if (output[0])
             {
                 append_output_to(t, output);
@@ -790,7 +851,7 @@ static void execute_current_command(void)
 
     char command[GUI_MAX_INPUT];
 
-    char line[GUI_MAX_INPUT + 64];
+    char line[GUI_MAX_INPUT + 128];
 
     if (t->input_len > 0)
     {
@@ -805,8 +866,8 @@ static void execute_current_command(void)
         snprintf(
             line,
             sizeof(line),
-            "%s%s\n",
-            PROMPT,
+            "terminator@%.500s> %.600s\n",
+            t->cwd,
             command);
 
         append_output(line);
@@ -827,6 +888,7 @@ static void execute_current_command(void)
 
     t->input[0] = '\0';
     t->input_len = 0;
+    t->cursor_pos = 0;
 
     t->history_position = history_count;
 }
@@ -1226,6 +1288,7 @@ void run_gui(TerminatorMode mode)
                         t->search_saved_input);
 
                     t->input_len = (int)strlen(t->input);
+                    t->cursor_pos = t->input_len;
                 }
                 else if (k == XK_BackSpace || k == XK_Delete)
                 {
@@ -1249,6 +1312,7 @@ void run_gui(TerminatorMode mode)
                             history[t->search_index]);
 
                         t->input_len = (int)strlen(t->input);
+                        t->cursor_pos = t->input_len;
                     }
 
                     t->search_mode = 0;
@@ -1289,6 +1353,7 @@ void run_gui(TerminatorMode mode)
                         history[t->history_position]);
 
                     t->input_len = (int)strlen(t->input);
+                    t->cursor_pos = t->input_len;
                 }
 
                 redraw();
@@ -1310,6 +1375,7 @@ void run_gui(TerminatorMode mode)
                         history[t->history_position]);
 
                     t->input_len = (int)strlen(t->input);
+                    t->cursor_pos = t->input_len;
                 }
                 else
                 {
@@ -1317,10 +1383,47 @@ void run_gui(TerminatorMode mode)
 
                     t->input[0] = '\0';
                     t->input_len = 0;
+                    t->cursor_pos = 0;
                 }
 
                 redraw();
 
+                continue;
+            }
+
+            /* Move cursor left */
+            if (k == XK_Left)
+            {
+                if (t->cursor_pos > 0)
+                    t->cursor_pos--;
+
+                redraw();
+                continue;
+            }
+
+            /* Move cursor right */
+            if (k == XK_Right)
+            {
+                if (t->cursor_pos < t->input_len)
+                    t->cursor_pos++;
+
+                redraw();
+                continue;
+            }
+
+            /* Move cursor to beginning */
+            if (k == XK_Home)
+            {
+                t->cursor_pos = 0;
+                redraw();
+                continue;
+            }
+
+            /* Move cursor to end */
+            if (k == XK_End)
+            {
+                t->cursor_pos = t->input_len;
+                redraw();
                 continue;
             }
 
@@ -1334,26 +1437,56 @@ void run_gui(TerminatorMode mode)
                 continue;
             }
 
-            /* Backspace */
-            if (k == XK_BackSpace || k == XK_Delete)
+            /* Backspace: delete the character before the cursor. */
+            if (k == XK_BackSpace)
             {
-                if (t->input_len > 0)
-                    t->input[--t->input_len] = '\0';
+                if (t->cursor_pos > 0)
+                {
+                    memmove(
+                        t->input + t->cursor_pos - 1,
+                        t->input + t->cursor_pos,
+                        (size_t)(t->input_len - t->cursor_pos + 1));
+
+                    t->cursor_pos--;
+                    t->input_len--;
+                }
 
                 redraw();
-
                 continue;
             }
 
-            /* Normal typed character */
+            /* Delete: delete the character after the cursor. */
+            if (k == XK_Delete)
+            {
+                if (t->cursor_pos < t->input_len)
+                {
+                    memmove(
+                        t->input + t->cursor_pos,
+                        t->input + t->cursor_pos + 1,
+                        (size_t)(t->input_len - t->cursor_pos));
+
+                    t->input_len--;
+                }
+
+                redraw();
+                continue;
+            }
+
+            /* Insert a character at the current cursor position. */
             if (n > 0 &&
                 key[0] >= 32 &&
                 key[0] != 127 &&
                 t->input_len < GUI_MAX_INPUT - 1)
             {
-                t->input[t->input_len++] = key[0];
+                memmove(
+                    t->input + t->cursor_pos + 1,
+                    t->input + t->cursor_pos,
+                    (size_t)(t->input_len - t->cursor_pos + 1));
 
-                t->input[t->input_len] = '\0';
+                t->input[t->cursor_pos] = key[0];
+
+                t->cursor_pos++;
+                t->input_len++;
 
                 redraw();
             }

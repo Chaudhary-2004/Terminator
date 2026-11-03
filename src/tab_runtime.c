@@ -19,6 +19,7 @@
 
 /* Reserved status for unsolicited background output. */
 #define RUNTIME_ASYNC_STATUS (-998)
+#define RUNTIME_CWD_STATUS (-997)
 #define RUNTIME_EXIT_STATUS (-999)
 
 typedef struct
@@ -209,6 +210,7 @@ static int handle_one_request(int fd, int thread_mode, char *thread_cwd)
     RequestHeader request;
     char command[RUNTIME_MAX_COMMAND];
     char output[TAB_RUNTIME_BUFFER_SIZE];
+    char cwd[4096];
     int status = 0;
 
     if (read_all(fd, &request, sizeof(request)) != 0)
@@ -216,9 +218,7 @@ static int handle_one_request(int fd, int thread_mode, char *thread_cwd)
 
     if (request.length == 0 ||
         request.length >= sizeof(command))
-    {
         return -1;
-    }
 
     if (read_all(fd, command, request.length) != 0)
         return -1;
@@ -246,8 +246,10 @@ static int handle_one_request(int fd, int thread_mode, char *thread_cwd)
             sizeof(output),
             &status);
 
-        if (getcwd(thread_cwd, 4096) == NULL)
+        if (getcwd(thread_cwd, sizeof(cwd)) == NULL)
             thread_cwd[0] = '\0';
+
+        snprintf(cwd, sizeof(cwd), "%s", thread_cwd);
 
         if (original_cwd[0] != '\0')
             (void)chdir(original_cwd);
@@ -261,6 +263,9 @@ static int handle_one_request(int fd, int thread_mode, char *thread_cwd)
             output,
             sizeof(output),
             &status);
+
+        if (getcwd(cwd, sizeof(cwd)) == NULL)
+            cwd[0] = '\0';
     }
 
     shell_process_pending_signal();
@@ -268,8 +273,16 @@ static int handle_one_request(int fd, int thread_mode, char *thread_cwd)
     if (shell_exit_requested())
         status = RUNTIME_EXIT_STATUS;
 
+    /* Send normal command output first. */
     if (send_response(fd, output, status) != 0)
         return -1;
+
+    /* Send the worker's current directory separately for the GUI prompt. */
+    if (status != RUNTIME_EXIT_STATUS)
+    {
+        if (send_response(fd, cwd, RUNTIME_CWD_STATUS) != 0)
+            return -1;
+    }
 
     return shell_exit_requested() ? -1 : 0;
 }
